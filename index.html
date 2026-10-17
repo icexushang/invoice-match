@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>发票 XML × 应收单 自动匹配复核 · 原型</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">💠</span>
+    <div>
+      <h1>发票 XML × 应收单 · 自动匹配复核</h1>
+      <p class="sub">原型 Prototype · 匹配复核 + <b>核销台账（含反核销闭环）</b>，<b>不生成凭证、不回写 ERP</b></p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span class="env-tag">DEMO</span>
+    <button id="btn-reset" class="btn ghost">重置演示数据</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="import">① 发票导入</button>
+  <button class="tab" data-tab="review">② 匹配复核 <span id="badge-pending" class="badge">0</span></button>
+  <button class="tab" data-tab="writeoff">③ 核销台账 <span id="badge-wo" class="badge gray">0</span></button>
+  <button class="tab" data-tab="ar">④ 应收单池</button>
+  <button class="tab" data-tab="rules">⑤ 规则说明</button>
+</nav>
+
+<main>
+  <!-- ① 发票导入 -->
+  <section id="panel-import" class="panel active">
+    <div class="card">
+      <div class="card-head"><h2>导入发票 XML</h2></div>
+      <textarea id="xml-input" spellcheck="false"
+        placeholder="在此粘贴发票 XML 内容，例如：&#10;<Invoice>&#10;  <发票代码>044001900111</发票代码>&#10;  <发票号码>10000001</发票号码>&#10;  <购买方名称>北京星辰科技有限公司</购买方名称>&#10;  <购买方纳税人识别号>91110108MA01ABCD12</购买方纳税人识别号>&#10;  <金额>10000.00</金额>&#10;  <备注>合同编号:HT2024001</备注>&#10;</Invoice>"></textarea>
+      <div class="row actions">
+        <button id="btn-parse" class="btn primary">解析并导入</button>
+        <label class="btn ghost file-label">选择 XML 文件<input type="file" id="file-input" accept=".xml,text/xml" multiple hidden></label>
+        <button id="btn-samples" class="btn ghost">加载全部示例发票</button>
+        <button id="btn-dup-test" class="btn ghost warn">测试：重复导入示例 A</button>
+      </div>
+      <p class="hint">
+        支持两类 XML：<b>数电票</b>（根节点 <code>&lt;EInvoice&gt;</code>，购买方税号取 <code>BuyerInformation/BuyerIdNum</code>，
+        不含税金额取 <code>BasicInformation/TotalAmWithoutTax</code>，备注取 <code>AdditionalInformation/Remark</code>）
+        与通用 <code>&lt;Invoice&gt;</code> 平铺结构（如 <code>samples/</code> 下示例）；一个文件内可含多张发票。
+        所有字段均<b>原样保留</b>，不做裁剪。
+      </p>
+      <div id="import-msg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>已导入发票 <span id="inv-count" class="pill">0</span></h2>
+        <button id="btn-rematch" class="btn small">重新匹配</button>
+      </div>
+      <div class="table-wrap">
+        <table class="grid">
+          <thead><tr>
+            <th>发票代码</th><th>发票号码</th><th>购买方</th><th>税号</th>
+            <th class="num">不含税金额</th><th>合同编号</th><th>开票日期</th><th>状态</th>
+          </tr></thead>
+          <tbody id="inv-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ② 匹配复核 -->
+  <section id="panel-review" class="panel">
+    <div class="legend">
+      <span class="chip high">高置信 · 可一键确认</span>
+      <span class="chip mid">中置信 · 需逐项核对（标红差异）</span>
+      <span class="chip rec">自动推荐组合 · 人工确认</span>
+      <span class="chip none">未匹配 · 人工池</span>
+    </div>
+    <div id="review-body"></div>
+  </section>
+
+  <!-- ③ 核销台账 -->
+  <section id="panel-writeoff" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <h2>历史已结算数据（数据源同步）</h2>
+        <span class="note">台账中的「历史结算」快照行：数据源一变即自动刷新</span>
+      </div>
+      <div class="row actions">
+        <label class="chk"><input type="checkbox" id="hist-pool" checked> 同步应收单池「已结算金额 / 未结算金额 / 核销状态」</label>
+        <label class="btn ghost file-label">上传历史已结算文件（JSON / CSV）<input type="file" id="hist-file" accept=".json,.csv,.txt" hidden></label>
+        <button id="hist-sync" class="btn ghost">立即同步台账</button>
+        <button id="hist-clear" class="btn ghost warn">清除外部历史数据</button>
+      </div>
+      <div class="row filters">
+        <input id="hist-url" type="search" placeholder="外部数据源接口地址（JSON：数组或 {records:[…]}，需允许 CORS）" />
+        <button id="hist-pull" class="btn small primary">立即拉取</button>
+        <label class="chk"><input type="checkbox" id="hist-autopoll"> 定时拉取</label>
+        <label class="chk">间隔
+          <select id="hist-poll-sec">
+            <option value="10">10 秒</option>
+            <option value="30" selected>30 秒</option>
+            <option value="60">1 分钟</option>
+            <option value="300">5 分钟</option>
+          </select>
+        </label>
+      </div>
+      <div id="hist-status" class="msg"></div>
+      <p class="hint">
+        历史已结算数据来自<b>数据源</b>：① 应收单池（模板导入的 <code>已结算金额</code>、<code>已结算金额(本位币)</code>；
+        无该列时按 <code>未结算折本币</code> 反算）；② 外部接口地址（按间隔定时拉取）；③ 上传 JSON / CSV 文件。
+        三类记录按<b>应收单号</b>去重（外部数据源优先）后整体刷新台账中的「历史结算」快照行。
+        <br>外部文件字段（中文表头 / 英文键名均可）：<code>应收单号</code>、<code>已结算金额</code>、<code>结算日期</code>、
+        <code>客户</code>、<code>合同编号</code>、<code>应收金额</code>、<code>结算单号</code>、<code>核销状态</code>、<code>备注</code>。
+        CSV 示例见 <code>samples/历史已结算数据示例.csv</code>。
+        <br>「历史结算」行为<b>来源系统既成事实的快照</b>：不占用应收单余额（余额口径已体现在应收单的「已核销」）、
+        不可反核销、可随数据源刷新；纠错请修正数据源后重新同步。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>核销台账 <span id="wo-count" class="pill">0</span></h2>
+        <div class="row">
+          <label class="chk">自动刷新
+            <select id="wo-auto">
+              <option value="0">关闭</option>
+              <option value="5">5 秒</option>
+              <option value="10" selected>10 秒</option>
+              <option value="30">30 秒</option>
+            </select>
+          </label>
+          <span class="note" id="wo-last">—</span>
+          <span class="note" id="wo-backend">存储：—</span>
+          <button id="wo-export" class="btn small">导出台账（CSV）</button>
+        </div>
+      </div>
+      <div class="row filters">
+        <input id="wo-kw" type="search" placeholder="检索：批次号 / 发票号 / 应收单号 / 客户 / 合同号" />
+        <select id="wo-status">
+          <option value="">全部状态</option>
+          <option value="VALID">有效</option>
+          <option value="REVERSED">已反核销</option>
+        </select>
+        <select id="wo-entry">
+          <option value="">全部类型</option>
+          <option value="WRITE_OFF">核销</option>
+          <option value="REVERSE">反核销</option>
+          <option value="HISTORY">历史结算（数据源）</option>
+        </select>
+        <select id="wo-method">
+          <option value="">全部来源</option>
+          <option value="自动高置信">自动高置信</option>
+          <option value="自动推荐">自动推荐</option>
+          <option value="人工确认">人工确认</option>
+          <option value="人工圈选">人工圈选</option>
+          <option value="历史结算同步">历史结算同步</option>
+        </select>
+        <label class="chk">业务日期 <input id="wo-from" type="date" /> ~ <input id="wo-to" type="date" /></label>
+        <select id="wo-size">
+          <option value="10">每页 10</option>
+          <option value="20">每页 20</option>
+          <option value="50">每页 50</option>
+        </select>
+        <button id="wo-refresh" class="btn small ghost">刷新</button>
+      </div>
+      <div id="wo-summary" class="wo-summary"></div>
+      <div id="wo-msg" class="msg"></div>
+      <div class="table-wrap">
+        <table class="grid">
+          <thead><tr>
+            <th>批次号</th><th>类型</th><th>业务日期</th><th>客户</th><th>合同编号</th><th>来源</th>
+            <th class="num">发票数</th><th class="num">明细行</th><th class="num">核销金额</th><th class="num">差额</th>
+            <th>状态</th><th>操作人</th><th>操作</th>
+          </tr></thead>
+          <tbody id="wo-body"></tbody>
+        </table>
+      </div>
+      <div id="wo-pager" class="pager"></div>
+      <p class="hint">
+        台账<b>只追加不物理删除</b>：纠错走「反核销」——生成反向记录（金额取负、<code>refBatchNo</code> 指向原批次）、
+        原记录置「已反核销」、应收单余额与发票状态回滚，反核销本身同样留痕，可追溯。
+        <br>明细为「发票 × 应收单」逐行配对（<code>pairKey</code> = <code>invoiceId:arId</code>），核销前 / 后余额逐行留存；
+        <code>已核销 / 剩余余额</code>由台账中<b>有效记录</b>重算，不依赖前端缓存。
+        <br><b>自动刷新</b>：按上表间隔比对台账变更指纹（<code>Store.signature()</code>），有变化才重新查询渲染；
+        切换页签、页面重新可见、其他标签页写入台账时也会立即重查，台账始终呈现最新数据（等效于网页端实时查库）。
+        <br>规则与字段口径见 <code>docs/核销台账PRD-v1.0.md</code>。
+      </p>
+    </div>
+    <div class="card">
+      <details id="wo-report-details">
+        <summary class="report-summary">
+          <span>📊 汇总对账（按客户 / 会计期间 / 应收单余额）</span>
+          <span class="note">基于台账全量有效记录，不受上方筛选影响 · 点击展开 / 收起</span>
+        </summary>
+        <div id="wo-report" style="margin-top:12px"></div>
+      </details>
+    </div>
+  </section>
+
+  <!-- 反核销弹窗（无审批：原因码 + 备注 + 二次确认） -->
+  <div id="wo-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h3 id="wo-modal-title">反核销</h3>
+      <div id="wo-modal-body" class="modal-body"></div>
+      <label class="chk">原因码
+        <select id="wo-reason-code">
+          <option value="WRONG_AR">应收单选错（WRONG_AR）</option>
+          <option value="WRONG_INVOICE">发票选错（WRONG_INVOICE）</option>
+          <option value="AMOUNT_ERROR">金额错误（AMOUNT_ERROR）</option>
+          <option value="DUP_ENTRY">重复录入（DUP_ENTRY）</option>
+          <option value="OTHER">其他（OTHER）</option>
+        </select>
+      </label>
+      <textarea id="wo-reason-text" rows="2" placeholder="补充说明（可选）"></textarea>
+      <div class="row actions">
+        <button id="wo-modal-ok" class="btn primary">确认反核销</button>
+        <button id="wo-modal-cancel" class="btn ghost">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ④ 应收单池 -->
+  <section id="panel-ar" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <h2>导入财务应收单（按模板）</h2>
+        <span class="note">支持 .xlsx / .csv</span>
+      </div>
+      <div class="row actions">
+        <label class="btn primary file-label">选择模板文件<input type="file" id="ar-file-input" accept=".xlsx,.csv,.txt" multiple hidden></label>
+        <button class="btn ghost" id="btn-ar-sample">加载内置示例（模板结构）</button>
+        <button class="btn ghost" data-ar-act="template">下载导入模板（CSV）</button>
+        <button class="btn ghost warn" data-ar-act="clear">清空应收单池</button>
+      </div>
+      <div class="row actions">
+        <label class="chk"><input type="checkbox" id="ar-clear-first" checked> 导入前清空应收单池（含示例数据）</label>
+        <label class="chk">金额口径：
+          <select id="ar-amount-mode">
+            <option value="excl" selected>不含税（金额）</option>
+            <option value="incl">含税（应收金额）</option>
+          </select>
+        </label>
+      </div>
+      <div id="ar-import-msg" class="msg"></div>
+      <p class="hint">
+        模板结构（对齐 <code>数据模板-财务应收单.xlsx</code> 的「<b>列表数据</b>」表）：<b>第 1 行为中文字段名表头</b>（69 列），
+        <b>第 2 行起为数据行</b>。列顺序可调整、可增删无关列，程序按字段名识别；「单据编号」为空时自动编号。
+        <br>所有字段一律<b>原样保留</b>（含 <code>-</code>、<code>(</code>、<code>)</code> 等字符，不做裁剪）；
+        点击任意行可展开查看<b>全部原始字段</b>。
+        <br>金额：默认取<b>不含税「金额」</b>（与发票「不含税金额」同口径），可切换为含税「应收金额」；
+        「未结算折本币 / 未结算金额」有值时作为<b>剩余余额</b>，否则取全额。
+        <br>模板未含客户税号列，可另选<b>客户档案</b>文件（<code>编码</code> + <code>统一社会信用代码</code>）一起导入以补全税号；
+        未补到时匹配降级为<b>合同号 + 金额</b>。
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>应收单池 <span id="ar-count" class="pill">0</span></h2>
+      </div>
+      <div class="table-wrap">
+        <table class="grid">
+          <thead><tr>
+            <th>应收单号</th><th>客户</th><th>客户税号</th><th>单据日期</th><th class="num">金额</th>
+            <th class="num">已核销</th><th class="num">剩余余额</th><th>合同编号</th><th>来源</th><th>状态</th>
+          </tr></thead>
+          <tbody id="ar-tbody"></tbody>
+        </table>
+      </div>
+      <p class="hint">提示：「已核销」= 数据源历史已结算（模板 <code>已结算金额 / 未结算折本币</code>）+ 本系统台账有效核销；
+        历史已结算会同步为 ③ 页的「历史结算」行。部分核销后，剩余余额会自动出现在后续匹配候选中（如场景 C 可先给一条应收单先核销一部分）。</p>
+    </div>
+  </section>
+
+  <!-- ⑤ 规则说明 -->
+  <section id="panel-rules" class="panel">
+    <div class="card prose">
+      <h2>匹配与复核规则（摘自 PRD）</h2>
+      <h3>1. 匹配优先级</h3>
+      <p>购买方税号 → 合同编号 → 不含税金额 → 购买方名称（仅展示）。</p>
+      <h3>2. 置信分档</h3>
+      <table class="grid small">
+        <thead><tr><th>分档</th><th>判定条件</th><th>系统动作</th><th>复核人操作</th></tr></thead>
+        <tbody>
+          <tr><td><span class="chip high">高置信</span></td><td>税号一致 + 金额在容差内</td><td>自动预绑定</td><td>一键/批量确认</td></tr>
+          <tr><td><span class="chip mid">中置信</span></td><td>合同号一致或提取失败，金额在容差内但税号缺失/不匹配</td><td>预绑定并高亮差异点</td><td>逐项核对后确认或改绑</td></tr>
+          <tr><td><span class="chip none">未匹配</span></td><td>金额超容差，或无同合同同客户应收单</td><td>不自动绑定，进人工池</td><td>手动关联或标记异常</td></tr>
+        </tbody>
+      </table>
+      <h3>3. 金额容差</h3>
+      <ul>
+        <li>差额 ≤ 0.01 元：四舍五入差，计入<b>高置信</b>。</li>
+        <li>差额 0.01 ~ 1 元：降为<b>中置信</b>，界面标红显示差额。</li>
+        <li>差额 &gt; 1 元：不自动匹配，进<b>未匹配池</b>。</li>
+        <li>一对多/多对一时，用发票组与应收单组的<b>合计金额</b>套用同一容差。</li>
+      </ul>
+      <h3>4. 多对多处理</h3>
+      <ul>
+        <li>单对单：金额容差内自动预绑定。</li>
+        <li>一对多（合并开票）：自动推荐组合，人工确认。</li>
+        <li>多对一（拆分收款）：自动推荐组合，人工确认。</li>
+        <li>多对多：<b>不自动组合</b>，仅列出同合同号、同税号候选，由人工圈选。</li>
+      </ul>
+      <h3>5. 合同编号提取</h3>
+      <p>从备注按正则 <code>合同\s*[编号]{0,2}\s*[：:]\s*([A-Za-z0-9\-_·]+)</code> 提取，全角/半角冒号均可，提取结果<b>原样保留</b>（含 <code>-</code>、<code>·</code> 等字符）；仅在与应收单比对时使用规范化比较键。提取失败视为未知，降级为<b>税号 + 金额</b>匹配。</p>
+      <h3>6. 发票 XML 解析</h3>
+      <ul>
+        <li><b>数电票</b>（根节点 <code>&lt;EInvoice&gt;</code>）：购买方税号取 <code>BuyerInformation/BuyerIdNum</code>，不含税金额取 <code>BasicInformation/TotalAmWithoutTax</code>（多明细时为合计），税额 <code>TotalTaxAm</code>，价税合计 <code>TotalTax-includedAmount</code>，开票日期 <code>TaxSupervisionInfo/IssueTime</code>，备注 <code>AdditionalInformation/Remark</code>；明细行 <code>IssuItemInformation</code> 支持多行。</li>
+        <li><b>通用 &lt;Invoice&gt;</b> 平铺结构：按标签名宽松匹配（<code>购买方纳税人识别号</code> / <code>BuyerIdNum</code> / <code>InvoiceNo</code> / <code>金额</code> …）。</li>
+        <li>一个文件内可含多张发票，全部导入；数电票无「发票代码」，该列显示 <code>-</code>。</li>
+      </ul>
+      <h3>7. 异常分支</h3>
+      <ul>
+        <li>重复导入同一张发票（代码+号码）→ 拦截，不进匹配。</li>
+        <li>备注无合同编号 → 降级税号+金额；仍无匹配进人工池。</li>
+        <li>金额超容差 → 标红差额，进未匹配池。</li>
+        <li>一张发票多候选 → 按金额合计排序，人工选择。</li>
+        <li>发票后续作废/退票 → 标记异常，可追溯，不自动反冲。</li>
+      </ul>
+      <h3>8. 应收单导入（按模板）</h3>
+      <ul>
+        <li>模板对齐《数据模板-财务应收单.xlsx》的「列表数据」表：<b>第 1 行中文字段名表头</b>（69 列），<b>第 2 行起为数据</b>；按字段名识别列，列顺序可调整、可增删无关列。</li>
+        <li><b>所有字段原样保留</b>：含 <code>-</code>、<code>(</code>、<code>)</code>、<code>·</code> 等字符不做裁剪；点击应收单行可展开查看全部原始字段。</li>
+        <li>合同号取 <code>合同号</code> → <code>合同(编)号</code> 的<b>原值</b>；仅在与发票比对时使用规范化键（去空格/连字符并大写），原值不受影响。</li>
+        <li>金额口径可选：默认<b>不含税「金额」</b>（与发票「不含税金额」同口径），亦可切换为含税「应收金额」；取不到时按税额/数量单价反算。</li>
+        <li>剩余余额取「未结算折本币 / 未结算金额」，无值时视为全额未核销。</li>
+        <li>模板不含客户税号列，可另选「客户档案」（<code>编码</code> + <code>统一社会信用代码</code>）文件一起导入补全税号；补不到则降级为合同号+金额匹配。</li>
+        <li>金额为负的红字/冲销单据正常导入并保留原值，但不参与自动匹配。</li>
+        <li>重复导入同一「单据编号」→ 拦截并在导入提示区列出。</li>
+      </ul>
+      <h3>9. 核销台账与反核销闭环</h3>
+      <ul>
+        <li><b>台账只追加</b>：核销记录写入后不修改、不物理删除；纠错一律走「反核销」。</li>
+        <li><b>配分明细</b>：每笔核销按「发票 × 应收单」逐行配对（<code>pairKey</code> = <code>invoiceId:arId</code>），记录本行核销额与核销前 / 后余额；一对多、多对一、多对多均可见每张发票抵了哪张应收单多少。</li>
+        <li><b>金额守恒</b>：Σ 明细核销额 = 台账核销总额；<code>已核销 + 剩余余额 = 原金额</code>（容差 0.01 元）。</li>
+        <li><b>入库二次校验</b>：写入前重新读取台账中有效记录的累计核销额，校验应收单余额是否仍然足够；发票已核销则拦截（<code>INVOICE_ALREADY_WRITTEN</code>）。</li>
+        <li><b>幂等</b>：同一 <code>idempotencyKey</code> 重复提交只入库一次，重复请求返回原记录。</li>
+        <li><b>反核销</b>（无需审批）：生成反向记录（金额取负、<code>refBatchNo</code> 指向原批次、明细逐行取负且 <code>pairKey</code> 不变），原记录置「已反核销」，应收单余额与状态回滚，发票回到「待匹配」重新参与匹配；同一记录<b>只能反核销一次</b>（禁链式）。</li>
+        <li><b>原因码必填</b>：<code>WRONG_AR</code> / <code>WRONG_INVOICE</code> / <code>AMOUNT_ERROR</code> / <code>DUP_ENTRY</code> / <code>OTHER</code>，连同操作人与时间一并留痕。</li>
+        <li><b>期间关账</b>：原核销所属会计期间已关账时，禁止直接反核销（<code>PERIOD_CLOSED</code>），应改走当期红冲（本期未开放）。</li>
+        <li><b>持久化</b>：原型优先使用 IndexedDB，不可用时降级 localStorage / 内存；设置 <code>window.WRITEOFF_API_BASE</code> 即切换为后端 HTTP 接口（<code>Store</code> 契约一致，UI 无需改动）。</li>
+        <li><b>字段口径</b>：业务日期 <code>bizDate</code> 决定会计期间，独立于操作时间；金额口径 <code>amountMode</code>（不含税 / 含税）在台账内隔离，不混用。</li>
+      </ul>
+      <h3>10. 历史已结算数据同步与台账自动刷新</h3>
+      <ul>
+        <li><b>历史数据源</b>：① 应收单池（模板 <code>已结算金额 / 已结算金额(本位币)</code>，无该列时按 <code>未结算折本币 / 未结算金额</code> 反算）；② 外部接口地址（JSON，可定时拉取）；③ 上传 JSON / CSV 文件。</li>
+        <li><b>去重与优先级</b>：三类来源按<b>应收单号</b>去重，外部数据源（接口 / 文件）优先于应收单池派生值；每条应收单最多一条历史结算记录。</li>
+        <li><b>台账呈现</b>：写入 <code>entryType = 'HISTORY'</code> 的「历史结算」行，<code>method = 历史结算同步</code>，来源列显示同步来源，可按类型 / 关键字筛选与导出。</li>
+        <li><b>与核销事实隔离</b>：历史结算行<b>不计入</b> <code>arWrittenOff()</code>（应收单余额口径已包含数据源已结算额）、不占用发票唯一性、不计入「有效核销净额」；汇总单独展示「历史已结算（数据源）」。</li>
+        <li><b>不可反核销</b>：历史结算是来源系统既成事实，仅提供「修正数据源 → 重新同步」路径；台账「只追加」约束仅适用于本系统的核销 / 反核销记录。</li>
+        <li><b>同步语义</b>：<code>Store.replaceHistory(records)</code> 以数据源当前内容<b>整体刷新</b>快照行（旧快照行被替换），保证台账历史数据与数据源一致。</li>
+        <li><b>自动刷新</b>：页面按间隔（关闭 / 5 / 10 / 30 秒）比对变更指纹 <code>Store.signature()</code>，有变化才重新查询与渲染；切换页签、页面重新可见、其他标签页写入台账（<code>storage</code> 事件）时立即重查。</li>
+        <li><b>接口契约</b>：外部数据源 JSON 支持数组或 <code>{ records: [ … ] }</code>，字段名兼容中文表头与英文键名（见 ③ 页说明）。</li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<script src="store.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
